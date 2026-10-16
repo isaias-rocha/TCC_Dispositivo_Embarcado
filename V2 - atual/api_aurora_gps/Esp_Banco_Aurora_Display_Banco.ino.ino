@@ -1,24 +1,24 @@
 /* =====================================================================
-   Aurora GPS - ESP32 (LED RGB, SOS, Bateria TP4056 e Status)
-   ===================================================================== */
+    Aurora GPS - ESP32 (LED RGB, SOS, Bateria TP4056 e Status)
+    ===================================================================== */
 
 // --- CONECTIVIDADE (Wi-Fi e Banco) ---
-#include <WiFi.h>             // Conexão de rede Wi-Fi
-#include <HTTPClient.h>       // Requisições HTTP para a API/Banco
+#include <WiFi.h>           // Conexão de rede Wi-Fi
+#include <HTTPClient.h>     // Requisições HTTP para a API/Banco
 
 // --- RASTREAMENTO (GPS) ---
-#include <TinyGPS++.h>        // Interpretação dos dados do módulo GPS
+#include <TinyGPS++.h>      // Interpretação dos dados do módulo GPS
 
 // --- DISPLAY (OLED) ---
-#include <Wire.h>             // Comunicação I2C (usada pelo display)
-#include <Adafruit_GFX.h>     // Motor gráfico para desenhar formas e textos
+#include <Wire.h>           // Comunicação I2C (usada pelo display)
+#include <Adafruit_GFX.h>   // Motor gráfico para desenhar formas e textos
 #include <Adafruit_SSD1306.h> // Driver específico do modelo de display OLED
 
 // --- BLUETOOTH (BLE) ---
-#include <BLEDevice.h>        // Gerenciamento geral do dispositivo Bluetooth
-#include <BLEServer.h>        // Criação do servidor para o celular conectar
-#include <BLEUtils.h>         // Utilitários auxiliares do Bluetooth
-#include <BLE2902.h>          // Permite enviar notificações ativas para o app
+#include <BLEDevice.h>      // Gerenciamento geral do dispositivo Bluetooth
+#include <BLEServer.h>      // Criação do servidor para o celular conectar
+#include <BLEUtils.h>       // Utilitários auxiliares do Bluetooth
+#include <BLE2902.h>        // Permite enviar notificações ativas para o app
 
 // ---------------------------------------------------------------------
 // CONFIGURAÇÕES DO DISPLAY OLED (128x64)
@@ -77,23 +77,25 @@ class MyServerCallbacks: public BLEServerCallbacks {
 // CONFIGURAÇÕES DE REDE, PINOS E Componentes
 // ---------------------------------------------------------------------
 const char* WIFI_SSID   = "Aurora";
-const char* WIFI_SENHA  = "equipe12345678";
-const char* API_URL     = "http://192.168.1.9/api_arduino/gravar.php";
-const char* API_KEY     = "arduino-gps-2026";
+const char* WIFI_SENHA  = "equipe01aurora";
+const char* API_URL     = "http://192.168.1.5/api_aurora_gps/gravar.php"; // ip da maquina local, veja o IPV4 e altere
+const char* API_KEY     = "aurora-gps-2026";
 
 const char* DEVICE_NOME   = "Aurora GPS";
 const char* DEVICE_MODELO = "ESP32 + NEO-6M";
 const char* FIRMWARE      = "1.0.0";
 
 const unsigned long INTERVALO_ENVIO   = 5000;  // Envio a cada 5s
-const unsigned long TEMPO_PRESS_SOS   = 3000;  // 3s para SOS
+const unsigned long TEMPO_PRESS_SOS   = 1000;  // 1s para acionar SOS
 
-const int pinoBotao   = 4;
-const int pinR        = 5;
-const int pinG        = 18;
-const int pinB        = 19;
-const int pinoBateria = 34; // GPIO 34 ADC1
-const int FUSO_HORARIO = -3;
+// PINOS DOS BOTÕES E LEDS
+const int pinoBotaoSOS = 4;   // Botão dedicado para SOS
+const int pinoBotaoGPS = 23;  // Novo: Botão para Liga/Desliga Rastreamento GPS
+const int pinR          = 5;
+const int pinG          = 18;
+const int pinB          = 19;
+const int pinoBateria   = 34; // GPIO 34 ADC1 (ver porcentagem da bateria)
+const int FUSO_HORARIO  = -3;
 
 TinyGPSPlus gps;
 HardwareSerial ss(2);
@@ -102,11 +104,15 @@ HardwareSerial ss(2);
 bool rastreamentoAtivo = false;
 bool piscaLEDVerde = false;
 
-// CONTROLE DO BOTÃO E TEMPOS
-unsigned long tempoInicioPressionado = 0;
+// CONTROLE DO BOTÃO SOS
+unsigned long tempoInicioSOS = 0;
 bool sosDisparado = false;
 unsigned long tempoExibicaoSOS = 0;
 bool mostrandoTelaSOS = false;
+
+// CONTROLE DO BOTÃO GPS (Debounce)
+int ultimoEstadoBotaoGPS = HIGH;
+unsigned long ultimoDebounceGPS = 0;
 
 unsigned long ultimoEnvio = 0;
 unsigned long ultimaAttDisplay = 0;
@@ -158,12 +164,9 @@ int lerBateriaPercentual() {
 }
 
 void desenharBateria(int x, int y, int percentual) {
-  // Corpo da Bateria (L:14px, A:8px)
   display.drawRect(x, y, 14, 8, WHITE);
-  // Polo Positivo (+)
   display.fillRect(x + 14, y + 2, 2, 4, WHITE);
   
-  // Preenchimento proporcional
   int larguraBarra = map(constrain(percentual, 0, 100), 0, 100, 0, 10);
   if (larguraBarra > 0) {
     display.fillRect(x + 2, y + 2, larguraBarra, 4, WHITE);
@@ -194,7 +197,7 @@ void atualizarOLED() {
   // 3. HORÁRIO (HH:MM)
   String dataHora = montarDataHora();
   if (dataHora != "") {
-    String horaStr = dataHora.substring(11, 16); // Formato HH:MM
+    String horaStr = dataHora.substring(11, 16);
     display.setCursor(26, 1);
     display.print(horaStr);
   } else {
@@ -202,7 +205,7 @@ void atualizarOLED() {
     display.print("--:--");
   }
 
-  // 4. BATERIA (Porcentagem + Ícone Gráfico)
+  // 4. BATERIA
   int pctBateria = lerBateriaPercentual();
   display.setCursor(76, 1);
   if(pctBateria < 100) display.print(" ");
@@ -211,21 +214,15 @@ void atualizarOLED() {
   
   desenharBateria(108, 1, pctBateria);
 
-  // LINHA DIVISÓRIA DA BARRA DE STATUS
   display.drawLine(0, 11, 128, 11, WHITE); 
 
   // TELA DE SOS
   if (mostrandoTelaSOS) {
     display.setTextSize(1);
-    
-    // Centraliza "SOS" na tela
     display.setCursor(55, 25);
     display.println("SOS");
-    
-    // Centraliza "ENVIADO!" logo abaixo
     display.setCursor(40, 37);
     display.println("ENVIADO!");
-    
     display.display();
     return;
   }
@@ -267,6 +264,7 @@ bool enviarParaAPI(bool isSOS = false) {
   }
 
   String dataHora = montarDataHora();
+  String dataEnvio = (dataHora != "" ? dataHora : "2026-01-01 00:00:00");
 
   String json = "{";
   json += "\"device_uid\":\"" + deviceUid + "\",";
@@ -286,7 +284,7 @@ bool enviarParaAPI(bool isSOS = false) {
   if (gps.altitude.isValid())   json += "\"altitude_m\":"     + String(gps.altitude.meters(), 2) + ",";
   if (gps.speed.isValid())      json += "\"velocidade_kmh\":" + String(gps.speed.kmph(), 2) + ",";
   if (gps.satellites.isValid()) json += "\"satelites\":"      + String(gps.satellites.value()) + ",";
-  json += "\"data_hora_gps\":\"" + (dataHora != "" ? dataHora : "N/A") + "\"}";
+  json += "\"data_hora_gps\":\"" + dataEnvio + "\"}";
 
   HTTPClient http;
   http.begin(API_URL);
@@ -329,7 +327,10 @@ void setup() {
   Serial.begin(115200);
   ss.begin(9600, SERIAL_8N1, 16, 17);
 
-  pinMode(pinoBotao, INPUT_PULLUP);
+  // Configuração dos Botões com Pull-Up Interno
+  pinMode(pinoBotaoSOS, INPUT_PULLUP);
+  pinMode(pinoBotaoGPS, INPUT_PULLUP);
+
   pinMode(pinR, OUTPUT);
   pinMode(pinG, OUTPUT);
   pinMode(pinB, OUTPUT);
@@ -371,7 +372,7 @@ void setup() {
   pAdvertising->setMinPreferred(0x0);
   BLEDevice::startAdvertising();
 
-  // Conexão Wi-Fi com Aguardo / Loop Bloqueante
+  // Conexão Wi-Fi
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_SENHA);
   
@@ -399,35 +400,45 @@ void loop() {
     gps.encode(ss.read());
   }
 
-  // LEITURA DO BOTÃO (Clique Curto vs Longo 3s SOS)
-  int leituraBotao = digitalRead(pinoBotao);
+  // -------------------------------------------------------------------
+  // 1. LEITURA DO BOTÃO SOS (Requer segurar por TEMPO_PRESS_SOS)
+  // -------------------------------------------------------------------
+  int leituraSOS = digitalRead(pinoBotaoSOS);
 
-  if (leituraBotao == LOW) {
-    if (tempoInicioPressionado == 0) {
-      tempoInicioPressionado = millis();
+  if (leituraSOS == LOW) {
+    if (tempoInicioSOS == 0) {
+      tempoInicioSOS = millis();
     }
 
-    if (!sosDisparado && (millis() - tempoInicioPressionado >= TEMPO_PRESS_SOS)) {
+    if (!sosDisparado && (millis() - tempoInicioSOS >= TEMPO_PRESS_SOS)) {
       sosDisparado = true;
       dispararAlertaSOS();
     }
   } 
   else {
-    if (tempoInicioPressionado > 0) {
-      unsigned long duracaoPressionado = millis() - tempoInicioPressionado;
-
-      if (duracaoPressionado < TEMPO_PRESS_SOS && duracaoPressionado > 50) {
-        if (!sosDisparado) {
-          rastreamentoAtivo = !rastreamentoAtivo;
-          atualizarOLED();
-        }
-      }
-      tempoInicioPressionado = 0;
-      sosDisparado = false;
-    }
+    tempoInicioSOS = 0;
+    sosDisparado = false;
   }
 
-  // Tira aviso SOS após 3s
+  // -------------------------------------------------------------------
+  // 2. LEITURA DO BOTÃO RASTREAMENTO GPS (Clique Único com Debounce)
+  // -------------------------------------------------------------------
+  int leituraGPS = digitalRead(pinoBotaoGPS);
+
+  if (leituraGPS == LOW && ultimoEstadoBotaoGPS == HIGH) {
+    if (millis() - ultimoDebounceGPS > 200) { // Filtro de ruído (200ms)
+      rastreamentoAtivo = !rastreamentoAtivo;
+      atualizarOLED();
+      ultimoDebounceGPS = millis();
+    }
+  }
+  ultimoEstadoBotaoGPS = leituraGPS;
+
+  // -------------------------------------------------------------------
+  // GERENCIAMENTO DAS DEMAIS TAREFAS
+  // -------------------------------------------------------------------
+
+  // Tira aviso SOS da tela após 3s
   if (mostrandoTelaSOS && (millis() - tempoExibicaoSOS > 3000)) {
     mostrandoTelaSOS = false;
     atualizarOLED();
@@ -445,13 +456,13 @@ void loop() {
     atualizarOLED();
   }
 
-  // Atualização periódica da Tela (1s)
+  // Atualização periódica do OLED (1s)
   if (millis() - ultimaAttDisplay > 1000) {
     ultimaAttDisplay = millis();
     atualizarOLED();
   }
 
-  // ENVIO AUTOMÁTICO A CADA 5 SEGUNDOS
+  // ENVIO AUTOMÁTICO A CADA 5 SEGUNDOS (Quando Rastreamento Ativo)
   if (rastreamentoAtivo && gps.location.isValid()) {
     if (millis() - ultimoEnvio >= INTERVALO_ENVIO) {
       ultimoEnvio = millis();
